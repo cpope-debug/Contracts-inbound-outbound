@@ -1,0 +1,455 @@
+
+import os
+import sys
+import time
+import base64
+import requests
+import logging
+from flask import Flask, render_template, request, flash
+from dotenv import load_dotenv
+from datetime import datetime
+from collections import defaultdict
+
+load_dotenv()
+app = Flask(__name__)
+
+# Secret key for flash messages
+app.secret_key = os.getenv('FLASK_SECRET_KEY') or os.urandom(24)
+
+# ---- Logging Configuration (stdout for Render) ----
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ---- Token Caching ----
+cached_token = None
+token_expiry = 0
+
+# ---- Rate Limiting ----
+request_counts = defaultdict(list)
+
+def _client_ip():
+    # Respect X-Forwarded-For behind proxy/LB
+    xff = request.headers.get('X-Forwarded-For')
+    if xff:
+        return xff.split(',')[0].strip()
+    return request.remote_addr or 'unknown'
+
+def rate_limit(identifier, max_requests=30, window=60):
+    """Simple rate limiting: max_requests per window (seconds)"""
+    now = time.time()
+    request_counts[identifier] = [t for t in request_counts[identifier] if now - t < window]
+    if len(request_counts[identifier]) >= max_requests:
+        return False
+    request_counts[identifier].append(now)
+    return True
+
+# ---- Input Validation ----
+def validate_date(date_str):
+    """Validate date format and reasonable range"""
+    try:
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        current_year = datetime.now().year
+        if date_obj.year < 2020 or date_obj.year > current_year + 2:
+            return False, "Date must be between 2020 and 2 years in the future"
+        return True, None
+    except ValueError:
+        return False, "Invalid date format. Please use YYYY-MM-DD"
+
+def validate_quantity(qty, max_qty=10000):
+    """Validate quantity is a reasonable integer"""
+    if not qty or qty.strip() == '' or qty == '0':
+        return True, None  # Empty or zero is valid
+    try:
+        qty_int = int(qty)
+        if qty_int < 0:
+            return False, "Quantity cannot be negative"
+        if qty_int > max_qty:
+            return False, f"Quantity cannot exceed {max_qty}"
+        return True, None
+    except (ValueError, TypeError):
+        return False, "Quantity must be a valid number"
+
+# ---- Token Management ----
+def get_token():
+    global cached_token, token_expiry
+    if cached_token and time.time() < token_expiry:
+        return cached_token
+
+    url = "https://secure-wms.com/AuthServer/api/Token"
+    client_id = os.getenv("CLIENT_ID") or os.getenv("EXTENSIV_CLIENT_ID")
+    client_secret = os.getenv("CLIENT_SECRET") or os.getenv("EXTENSIV_CLIENT_SECRET")
+    tpl_key = os.getenv("TPL_CODE") or os.getenv("EXTENSIV_TPL_KEY")
+
+    if not client_id or not client_secret:
+        logger.error("Missing CLIENT_ID or CLIENT_SECRET")
+        raise ValueError("CLIENT_ID and CLIENT_SECRET must be set in environment variables")
+
+    credentials = f"{client_id}:{client_secret}"
+    encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
+
+    headers = {
+        "Authorization": f"Basic {encoded_credentials}",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {
+        "grant_type": "client_credentials",
+        **({"tpl": tpl_key} if tpl_key else {}),
+        "user_login_id": "4"
+    }
+    try:
+        r = requests.post(url, headers=headers, data=data, timeout=30)
+        r.raise_for_status()
+        token_data = r.json()
+        cached_token = token_data["access_token"]
+        token_expiry = time.time() + token_data.get("expires_in", 3600) - 60
+        logger.info("Successfully obtained access token")
+        return cached_token
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Token request failed: {str(e)}")
+        raise e
+
+def get_api_headers():
+    """Get headers for API requests"""
+    if not cached_token or time.time() >= token_expiry:
+        get_token()
+    return {
+        'Authorization': f'Bearer {cached_token}',
+        'Content-Type': 'application/json',
+        'Accept': '*/*',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'User-Agent': 'gunicorn/flask-app'
+    }
+
+# ---- Routes ----
+@app.route("/")
+def index():
+    """Main form page - No login required"""
+    return render_template("form.html")
+
+@app.route("/create-receipt-and-order", methods=["POST"])
+def create_receipt_and_order():
+    ip_address = _client_ip()
+
+    # Rate limiting
+    if not rate_limit(f"ip_{ip_address}", max_requests=30, window=60):
+        logger.warning(f"Rate limit exceeded for IP: {ip_address}")
+        flash('Too many requests. Please wait a minute.', 'error')
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <title>Rate Limit Exceeded</title>
+        <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .error { color: red; }
+        .back-button { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; }
+        </style>
+        </head>
+        <body>
+        <h1 class="error">Too Many Requests</h1>
+        <p>Please wait a minute before submitting again.</p>
+        <a href="/" class="back-button">← Back to Form</a>
+        </body>
+        </html>
+        """, 429
+
+    # Validate date
+    date = request.form.get("date", "").strip()
+    date_valid, date_error = validate_date(date)
+    if not date_valid:
+        logger.warning(f"Invalid date submitted: {date} from IP: {ip_address}")
+        return error_response(f'Date validation error: {date_error}'), 400
+
+    # SCRAM items
+    scram_quantities = {
+        "Big Post Pallet": request.form.get("bigPost", "0"),
+        "GWA Order": request.form.get("gwa", "0"),
+        "MUJI Pallet": request.form.get("muji", "0"),
+        "Peace Lilly Order": request.form.get("peaceLilly", "0"),
+        "Relax House Order": request.form.get("relaxHouse", "0"),
+        "Mattress": request.form.get("mattress", "0"),
+    }
+
+    # Toshiba items
+    toshiba_quantities = {
+        "Toshiba/ S&H Carton": request.form.get("toshibaCarton", "0"),
+    }
+
+    # Validate all quantities
+    all_quantities = {**scram_quantities, **toshiba_quantities}
+    for sku, qty in all_quantities.items():
+        qty_valid, qty_error = validate_quantity(qty)
+        if not qty_valid:
+            logger.warning(f"Invalid quantity for {sku}: {qty} from IP: {ip_address}")
+            return error_response(f'Validation error for {sku}: {qty_error}'), 400
+
+    # Filter and convert quantities for SCRAM
+    scram_receipt_lines = []
+    scram_order_lines = []
+    for sku, qty in scram_quantities.items():
+        if qty and qty.strip() and qty != '0':
+            try:
+                qty_int = int(qty)
+                if qty_int > 0:
+                    scram_receipt_lines.append({"sku": sku, "expectedQty": qty_int})
+                    scram_order_lines.append({"sku": sku, "orderedQty": qty_int})
+            except (ValueError, TypeError):
+                continue
+
+    # Filter and convert quantities for Toshiba
+    toshiba_receipt_lines = []
+    toshiba_order_lines = []
+    for sku, qty in toshiba_quantities.items():
+        if qty and qty.strip() and qty != '0':
+            try:
+                qty_int = int(qty)
+                if qty_int > 0:
+                    toshiba_receipt_lines.append({"sku": sku, "expectedQty": qty_int})
+                    toshiba_order_lines.append({"sku": sku, "orderedQty": qty_int})
+            except (ValueError, TypeError):
+                continue
+
+    # Environment variables
+    customer_id = os.getenv("EXTENSIV_CUSTOMER_ID", "25")
+    facility_id = os.getenv("EXTENSIV_FACILITY_ID", "2")
+
+    # Timestamp for unique references
+    timestamp = str(int(time.time()))[-6:]
+
+    # Log the submission
+    logger.info(f"Form submission - Date: {date}, SCRAM items: {len(scram_receipt_lines)}, Toshiba items: {len(toshiba_receipt_lines)}, IP: {ip_address}")
+
+    results = []
+    try:
+        headers = get_api_headers()
+
+        # Process SCRAM items
+        if scram_receipt_lines:
+            scram_receipt_payload = {
+                "customerIdentifier": {"id": int(customer_id)},
+                "facilityIdentifier": {"id": int(facility_id)},
+                "warehouseTransactionSourceEnum": 7,
+                "transactionEntryType": 4,
+                "isReturn": False,
+                "referenceNum": f"SCRAM-R-{date}-{timestamp}",
+                "arrivalDate": f"{date}T00:00:00",
+                "expectedDate": f"{date}T00:00:00",
+                "notes": "SCRAM Inbound via form",
+                "receiveItems": [
+                    {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["expectedQty"])}
+                    for item in scram_receipt_lines
+                ]
+            }
+
+            scram_order_payload = {
+                "customerIdentifier": {"id": int(customer_id)},
+                "facilityIdentifier": {"id": int(facility_id)},
+                "referenceNum": f"SCRAM-O-{date}-{timestamp}",
+                "entryType": 4,
+                "orderType": "Standard",
+                "notes": "SCRAM Outbound order from form",
+                "orderItems": [
+                    {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["orderedQty"])}
+                    for item in scram_order_lines
+                ]
+            }
+
+            logger.info(f"Submitting SCRAM receipt: {scram_receipt_payload['referenceNum']}")
+            r1 = requests.post("https://secure-wms.com/inventory/receivers", json=scram_receipt_payload, headers=headers, timeout=30)
+            logger.info(f"Submitting SCRAM order: {scram_order_payload['referenceNum']}")
+            r2 = requests.post("https://secure-wms.com/orders", json=scram_order_payload, headers=headers, timeout=30)
+            logger.info(f"SCRAM results - Receipt: {r1.status_code}, Order: {r2.status_code}")
+
+            results.append({
+                'section': 'SCRAM',
+                'items': len(scram_receipt_lines),
+                'receipt': {'status': r1.status_code, 'response': r1.text},
+                'order': {'status': r2.status_code, 'response': r2.text}
+            })
+
+        # Process Toshiba items
+        if toshiba_receipt_lines:
+            toshiba_receipt_payload = {
+                "customerIdentifier": {"id": int(customer_id)},
+                "facilityIdentifier": {"id": int(facility_id)},
+                "warehouseTransactionSourceEnum": 7,
+                "transactionEntryType": 4,
+                "isReturn": False,
+                "referenceNum": f"Toshiba/S&H-R-{date}-{timestamp}",
+                "arrivalDate": f"{date}T00:00:00",
+                "expectedDate": f"{date}T00:00:00",
+                "notes": "Toshiba/S&H Inbound via form",
+                "receiveItems": [
+                    {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["expectedQty"])}
+                    for item in toshiba_receipt_lines
+                ]
+            }
+
+            toshiba_order_payload = {
+                "customerIdentifier": {"id": int(customer_id)},
+                "facilityIdentifier": {"id": int(facility_id)},
+                "referenceNum": f"Toshiba/S&H-O-{date}-{timestamp}",
+                "entryType": 4,
+                "orderType": "Standard",
+                "notes": "Toshiba/S&H Outbound order from form",
+                "orderItems": [
+                    {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["orderedQty"])}
+                    for item in toshiba_order_lines
+                ]
+            }
+
+            logger.info(f"Submitting Toshiba receipt: {toshiba_receipt_payload['referenceNum']}")
+            r3 = requests.post("https://secure-wms.com/inventory/receivers", json=toshiba_receipt_payload, headers=headers, timeout=30)
+            logger.info(f"Submitting Toshiba order: {toshiba_order_payload['referenceNum']}")
+            r4 = requests.post("https://secure-wms.com/orders", json=toshiba_order_payload, headers=headers, timeout=30)
+            logger.info(f"Toshiba results - Receipt: {r3.status_code}, Order: {r4.status_code}")
+
+            results.append({
+                'section': 'Toshiba / S&H',
+                'items': len(toshiba_receipt_lines),
+                'receipt': {'status': r3.status_code, 'response': r3.text},
+                'order': {'status': r4.status_code, 'response': r4.text}
+            })
+
+        # Build response HTML
+        response_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <title>Form Submission Results</title>
+        <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; }}
+        .success {{ color: green; }}
+        .error {{ color: red; }}
+        .section-box {{ background: #f9f9f9; padding: 20px; margin: 20px 0; border-radius: 8px; border: 2px solid #ddd; }}
+        .response-box {{ background: #f5f5f5; padding: 15px; margin: 10px 0; border-left: 4px solid #007cba; }}
+        .back-button {{ display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; }}
+        .info-box {{ background: #e7f3ff; padding: 10px; border-radius: 4px; margin-bottom: 20px; }}
+        h2 {{ color: #333; }}
+        h3 {{ color: #555; }}
+        </style>
+        </head>
+        <body>
+        <h1>Form Submission Results</h1>
+        <div class="info-box">
+          <p><strong>Date:</strong> {date}</p>
+          <p><strong>Submitted:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+        """
+
+        if not results:
+            response_html += """
+            <div class="section-box">
+              <p><strong>No items to process.</strong> All quantities were zero or empty.</p>
+            </div>
+            """
+        else:
+            for result in results:
+                receipt_class = 'success' if result['receipt']['status'] in [200, 201] else 'error'
+                order_class = 'success' if result['order']['status'] in [200, 201] else 'error'
+                response_html += f"""
+                <div class="section-box">
+                  <h2>{result['section']}</h2>
+                  <p><strong>Items processed:</strong> {result['items']} items</p>
+                  <h3>Receipt Creation</h3>
+                  <div class="response-box">
+                    <p><strong>Status:</strong> <span class="{receipt_class}">{result['receipt']['status']}</span></p>
+                    <p><strong>Response:</strong></p>
+                    <pre>{result['receipt']['response']}</pre>
+                  </div>
+                  <h3>Order Creation</h3>
+                  <div class="response-box">
+                    <p><strong>Status:</strong> <span class="{order_class}">{result['order']['status']}</span></p>
+                    <p><strong>Response:</strong></p>
+                    <pre>{result['order']['response']}</pre>
+                  </div>
+                </div>
+                """
+
+        response_html += """
+        <a href="/" class="back-button">← Back to Form</a>
+        </body>
+        </html>
+        """
+        return response_html
+
+    except requests.exceptions.Timeout:
+        logger.error("Request timeout")
+        return error_response("Request timeout. The API took too long to respond. Please try again.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error: {str(e)}")
+        return error_response(f"API request failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return error_response(f"An unexpected error occurred: {str(e)}")
+
+def error_response(message):
+    """Generate error response HTML"""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <title>Error</title>
+    <style>
+    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+    .error {{ color: red; }}
+    .back-button {{ display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; }}
+    </style>
+    </head>
+    <body>
+    <h1 class="error">Error Processing Request</h1>
+    <p><strong>Error:</strong> {message}</p>
+    <p>If this problem persists, please contact IT support.</p>
+    <a href="/" class="back-button">← Back to Form</a>
+    </body>
+    </html>
+    """
+
+@app.route("/test-auth")
+def test_auth():
+    """Test endpoint to verify authentication is working"""
+    try:
+        token = get_token()
+        logger.info("Authentication test successful")
+        return f"""
+        <h2>Authentication Test</h2>
+        <p><strong>Status:</strong> <span style="color: green;">SUCCESS</span></p>
+        <p><strong>Token obtained:</strong> Yes (length: {len(token)})</p>
+        <p><strong>Token expires:</strong> {datetime.fromtimestamp(token_expiry).isoformat()}</p>
+        <p><a href="/">← Back to Form</a></p>
+        """
+    except Exception as e:
+        logger.error(f"Authentication test failed: {str(e)}")
+        return f"""
+        <h2>Authentication Test</h2>
+        <p><strong>Status:</strong> <span style="color: red;">FAILED</span></p>
+        <p><strong>Error:</strong> {str(e)}</p>
+        <p><a href="/">← Back to Form</a></p>
+        """
+
+# Error handlers
+@app.errorhandler(404)
+def not_found(e):
+    return """
+    <h1>404 - Page Not Found</h1>
+    <p><a href="/">Go to Home</a></p>
+    """, 404
+
+@app.errorhandler(500)
+def internal_error(e):
+    logger.error(f"Internal server error: {str(e)}")
+    return """
+    <h1>500 - Internal Server Error</h1>
+    <p>Something went wrong. Please try again later.</p>
+    <p><a href="/">Go to Home</a></p>
+    """, 500
+
+if __name__ == "__main__":
+    # Local development only. On Render we use Gunicorn.
+    print("Running in LOCAL DEVELOPMENT mode (debug=True)")
+    app.run(debug=True, host='0.0.0.0', port=5000)
