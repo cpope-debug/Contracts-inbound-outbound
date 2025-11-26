@@ -3,6 +3,69 @@
 <html>
 <head>
   <meta charset="utf-8">
+<<<<<<< HEAD
+  <title>Warehouse Receipt & Order Form</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #f9f9f9;
+      --panel: #ffffff;
+      --border: #ddd;
+      --accent: #007cba;
+      --text: #333;
+      --muted: #555;
+    }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 40px;
+      color: var(--text);
+      background: var(--bg);
+    }
+    h1 { margin-bottom: 0.75rem; }
+    h2 { margin: 0.4rem 0 0.8rem; }
+    .section {
+      margin: 20px 0;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 240px 180px;
+      gap: 10px 18px;
+      align-items: center;
+    }
+    label { font-weight: 500; }
+    input[type="number"], input[type="text"], input[type="date"] {
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    input[type="number"] { width: 140px; }
+    .top { margin-bottom: 12px; }
+    .submit {
+      margin-top: 16px;
+    }
+    .submit button {
+      padding: 10px 18px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 15px;
+      cursor: pointer;
+    }
+    .submit button:hover { filter: brightness(1.05); }
+    .helper {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 6px;
+    }
+    .links { margin-top: 16px; font-size: 14px; }
+    .links a { color: var(--accent); text-decoration: none; }
+=======
   <title>Create Receipt & Order</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 40px; }
@@ -12,16 +75,36 @@
     .submit { margin-top: 16px; }
     input[type="number"] { width: 120px; }
     .top { margin-bottom: 12px; }
+>>>>>>> a7a87b28a6ac10c0e767f6a3904b1034660887c8
   </style>
 </head>
 <body>
   <h1>Warehouse Receipt & Order Form</h1>
+<<<<<<< HEAD
+
+  <!-- Main form posts to your Flask route -->
+  <form method="POST" action="/create-receipt-and-order">
+    <!-- DATE -->
+    <div class="section top">
+      <label for="date"><strong>Date:</strong></label><br />
+      <input
+        type="date"
+        id="date"
+        name="date"
+        required
+      />
+      <div class="helper" id="todayHint"></div>
+    </div>
+
+    <!-- SCRAM ITEMS -->
+=======
   <form method="POST" action="/create-receipt-and-order">
     <div class="section top">
       <label for="date"><strong>Date (YYYY-MM-DD):</strong></label>
       <input type="text" id="date" name="date" placeholder="2025-11-27" required />
     </div>
 
+>>>>>>> a7a87b28a6ac10c0e767f6a3904b1034660887c8
     <div class="section">
       <h2>SCRAM Items</h2>
       <div class="grid">
@@ -45,6 +128,10 @@
       </div>
     </div>
 
+<<<<<<< HEAD
+    <!-- TOSHIBA / S&H -->
+=======
+>>>>>>> a7a87b28a6ac10c0e767f6a3904b1034660887c8
     <div class="section">
       <h2>Toshiba / S&H</h2>
       <div class="grid">
@@ -53,10 +140,51 @@
       </div>
     </div>
 
+<<<<<<< HEAD
+    <!-- SUBMIT -->
+=======
+>>>>>>> a7a87b28a6ac10c0e767f6a3904b1034660887c8
     <div class="submit">
       <button type="submit">Submit Receipt + Order</button>
     </div>
   </form>
+<<<<<<< HEAD
+
+  <!-- Links -->
+  <div class="links">
+    <a href="/test-auth">Test Auth</a>
+  </div>
+
+  <!-- Prefill date with today's value and optional constraints -->
+  <script>
+    (function setTodayDefault() {
+      const dateInput = document.getElementById('date');
+      const hint = document.getElementById('todayHint');
+      if (!dateInput) return;
+
+      const today = new Date();
+      const yyyy = today.getFullYear();
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const dd = String(today.getDate()).padStart(2, '0');
+      const todayStr = `${yyyy}-${mm}-${dd}`;
+
+      // Defaults and (optional) constraints
+      dateInput.value = todayStr;
+      dateInput.min = '2020-01-01';                 // earliest allowed (optional)
+      // dateInput.max = `${yyyy + 2}-12-31`;       // limit to 2 years ahead (optional)
+
+      // Show a friendly hint
+      if (hint) {
+        try {
+          hint.textContent = `Default: ${today.toLocaleDateString()}`;
+        } catch (_) {
+          hint.textContent = `Default: ${todayStr}`;
+        }
+      }
+    })();
+  </script>
+=======
   <p>Need to test auth first? <a href="/test-auth">Test Auth</a></p>
+>>>>>>> a7a87b28a6ac10c0e767f6a3904b1034660887c8
 </body>
 </html>
