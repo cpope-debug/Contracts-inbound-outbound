@@ -1,4 +1,3 @@
-
 import os
 import sys
 import time
@@ -188,15 +187,27 @@ def create_receipt_and_order():
             logger.warning(f"Invalid quantity for {sku}: {qty} from IP: {ip_address}")
             return error_response(f'Validation error for {sku}: {qty_error}'), 400
 
-    # Filter and convert quantities for SCRAM
+    # Filter and convert quantities for SCRAM RECEIPT (excluding Mattress)
     scram_receipt_lines = []
+    for sku, qty in scram_quantities.items():
+        # Skip Mattress for receipts
+        if sku == "Mattress":
+            continue
+        if qty and qty.strip() and qty != '0':
+            try:
+                qty_int = int(qty)
+                if qty_int > 0:
+                    scram_receipt_lines.append({"sku": sku, "expectedQty": qty_int})
+            except (ValueError, TypeError):
+                continue
+
+    # Filter and convert quantities for SCRAM ORDER (including Mattress)
     scram_order_lines = []
     for sku, qty in scram_quantities.items():
         if qty and qty.strip() and qty != '0':
             try:
                 qty_int = int(qty)
                 if qty_int > 0:
-                    scram_receipt_lines.append({"sku": sku, "expectedQty": qty_int})
                     scram_order_lines.append({"sku": sku, "orderedQty": qty_int})
             except (ValueError, TypeError):
                 continue
@@ -222,54 +233,64 @@ def create_receipt_and_order():
     timestamp = str(int(time.time()))[-6:]
 
     # Log the submission
-    logger.info(f"Form submission - Date: {date}, SCRAM items: {len(scram_receipt_lines)}, Toshiba items: {len(toshiba_receipt_lines)}, IP: {ip_address}")
+    logger.info(f"Form submission - Date: {date}, SCRAM items: {len(scram_order_lines)}, Toshiba items: {len(toshiba_receipt_lines)}, IP: {ip_address}")
 
     results = []
     try:
         headers = get_api_headers()
 
         # Process SCRAM items
-        if scram_receipt_lines:
-            scram_receipt_payload = {
-                "customerIdentifier": {"id": int(customer_id)},
-                "facilityIdentifier": {"id": int(facility_id)},
-                "warehouseTransactionSourceEnum": 7,
-                "transactionEntryType": 4,
-                "isReturn": False,
-                "referenceNum": f"SCRAM-R-{date}-{timestamp}",
-                "arrivalDate": f"{date}T00:00:00",
-                "expectedDate": f"{date}T00:00:00",
-                "notes": "SCRAM Inbound via form",
-                "receiveItems": [
-                    {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["expectedQty"])}
-                    for item in scram_receipt_lines
-                ]
-            }
+        if scram_receipt_lines or scram_order_lines:
+            # Only create receipt if there are items (Mattress excluded)
+            receipt_created = False
+            if scram_receipt_lines:
+                scram_receipt_payload = {
+                    "customerIdentifier": {"id": int(customer_id)},
+                    "facilityIdentifier": {"id": int(facility_id)},
+                    "warehouseTransactionSourceEnum": 7,
+                    "transactionEntryType": 4,
+                    "isReturn": False,
+                    "referenceNum": f"SCRAM-R-{date}-{timestamp}",
+                    "arrivalDate": f"{date}T00:00:00",
+                    "expectedDate": f"{date}T00:00:00",
+                    "notes": "SCRAM Inbound via form",
+                    "receiveItems": [
+                        {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["expectedQty"])}
+                        for item in scram_receipt_lines
+                    ]
+                }
 
-            scram_order_payload = {
-                "customerIdentifier": {"id": int(customer_id)},
-                "facilityIdentifier": {"id": int(facility_id)},
-                "referenceNum": f"SCRAM-O-{date}-{timestamp}",
-                "entryType": 4,
-                "orderType": "Standard",
-                "notes": "SCRAM Outbound order from form",
-                "orderItems": [
-                    {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["orderedQty"])}
-                    for item in scram_order_lines
-                ]
-            }
+                logger.info(f"Submitting SCRAM receipt: {scram_receipt_payload['referenceNum']}")
+                r1 = requests.post("https://secure-wms.com/inventory/receivers", json=scram_receipt_payload, headers=headers, timeout=30)
+                logger.info(f"SCRAM receipt status: {r1.status_code}")
+                receipt_created = True
+            
+            # Always create order if there are order items
+            order_created = False
+            if scram_order_lines:
+                scram_order_payload = {
+                    "customerIdentifier": {"id": int(customer_id)},
+                    "facilityIdentifier": {"id": int(facility_id)},
+                    "referenceNum": f"SCRAM-O-{date}-{timestamp}",
+                    "entryType": 4,
+                    "orderType": "Standard",
+                    "notes": "SCRAM Outbound order from form",
+                    "orderItems": [
+                        {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["orderedQty"])}
+                        for item in scram_order_lines
+                    ]
+                }
 
-            logger.info(f"Submitting SCRAM receipt: {scram_receipt_payload['referenceNum']}")
-            r1 = requests.post("https://secure-wms.com/inventory/receivers", json=scram_receipt_payload, headers=headers, timeout=30)
-            logger.info(f"Submitting SCRAM order: {scram_order_payload['referenceNum']}")
-            r2 = requests.post("https://secure-wms.com/orders", json=scram_order_payload, headers=headers, timeout=30)
-            logger.info(f"SCRAM results - Receipt: {r1.status_code}, Order: {r2.status_code}")
+                logger.info(f"Submitting SCRAM order: {scram_order_payload['referenceNum']}")
+                r2 = requests.post("https://secure-wms.com/orders", json=scram_order_payload, headers=headers, timeout=30)
+                logger.info(f"SCRAM order status: {r2.status_code}")
+                order_created = True
 
             results.append({
                 'section': 'SCRAM',
-                'items': len(scram_receipt_lines),
-                'receipt': {'status': r1.status_code, 'response': r1.text},
-                'order': {'status': r2.status_code, 'response': r2.text}
+                'items': len(scram_order_lines),
+                'receipt': {'status': r1.status_code, 'response': r1.text} if receipt_created else None,
+                'order': {'status': r2.status_code, 'response': r2.text} if order_created else None
             })
 
         # Process Toshiba items
@@ -350,24 +371,35 @@ def create_receipt_and_order():
             """
         else:
             for result in results:
-                receipt_class = 'success' if result['receipt']['status'] in [200, 201] else 'error'
-                order_class = 'success' if result['order']['status'] in [200, 201] else 'error'
                 response_html += f"""
                 <div class="section-box">
                   <h2>{result['section']}</h2>
                   <p><strong>Items processed:</strong> {result['items']} items</p>
+                """
+                
+                if result.get('receipt'):
+                    receipt_class = 'success' if result['receipt']['status'] in [200, 201] else 'error'
+                    response_html += f"""
                   <h3>Receipt Creation</h3>
                   <div class="response-box">
                     <p><strong>Status:</strong> <span class="{receipt_class}">{result['receipt']['status']}</span></p>
                     <p><strong>Response:</strong></p>
                     <pre>{result['receipt']['response']}</pre>
                   </div>
+                    """
+                
+                if result.get('order'):
+                    order_class = 'success' if result['order']['status'] in [200, 201] else 'error'
+                    response_html += f"""
                   <h3>Order Creation</h3>
                   <div class="response-box">
                     <p><strong>Status:</strong> <span class="{order_class}">{result['order']['status']}</span></p>
                     <p><strong>Response:</strong></p>
                     <pre>{result['order']['response']}</pre>
                   </div>
+                    """
+                
+                response_html += """
                 </div>
                 """
 
