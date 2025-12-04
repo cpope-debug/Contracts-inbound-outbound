@@ -124,6 +124,52 @@ def get_api_headers():
         'User-Agent': 'gunicorn/flask-app'
     }
 
+# ---- Helper Functions ----
+def get_mattress_lot_numbers():
+    """
+    Query available mattress inventory and return lot numbers matching 'Dusk and Dawn' or 'BA'
+    Returns a list of matching lot identifiers
+    """
+    try:
+        headers = get_api_headers()
+        customer_id = os.getenv("EXTENSIV_CUSTOMER_ID", "25")
+        facility_id = os.getenv("EXTENSIV_FACILITY_ID", "2")
+        
+        # Query inventory for Mattress SKU
+        inventory_url = f"https://secure-wms.com/inventory?customerIdentifier.id={customer_id}&facilityIdentifier.id={facility_id}&itemIdentifier.sku=Mattress"
+        
+        logger.info("Querying mattress inventory for lot numbers")
+        r = requests.get(inventory_url, headers=headers, timeout=30)
+        
+        if r.status_code == 200:
+            inventory_data = r.json()
+            matching_lots = []
+            
+            # Parse inventory response to find lots matching our criteria
+            if isinstance(inventory_data, dict) and 'ResourceList' in inventory_data:
+                for item in inventory_data['ResourceList']:
+                    lot_num = item.get('lotIdentifier', {}).get('lotNumber', '')
+                    if lot_num:
+                        lot_lower = lot_num.lower()
+                        # Check if lot matches "Dusk and Dawn" (any capitalization) or "BA"
+                        if 'dusk and dawn' in lot_lower or lot_num.upper() == 'BA':
+                            matching_lots.append(item.get('lotIdentifier'))
+                            logger.info(f"Found matching lot: {lot_num}")
+            
+            if matching_lots:
+                logger.info(f"Found {len(matching_lots)} matching mattress lot(s)")
+                return matching_lots[0]  # Return the first matching lot
+            else:
+                logger.warning("No matching mattress lots found, will not specify lot number")
+                return None
+        else:
+            logger.warning(f"Failed to query inventory: {r.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error querying mattress lots: {str(e)}")
+        return None
+
 # ---- Routes ----
 @app.route("/")
 def index():
@@ -187,6 +233,18 @@ def create_receipt_and_order():
             logger.warning(f"Invalid quantity for {sku}: {qty} from IP: {ip_address}")
             return error_response(f'Validation error for {sku}: {qty_error}'), 400
 
+    # Check if we need to query for mattress lots
+    mattress_lot = None
+    mattress_qty = scram_quantities.get("Mattress", "0")
+    if mattress_qty and mattress_qty.strip() and mattress_qty != '0':
+        try:
+            qty_int = int(mattress_qty)
+            if qty_int > 0:
+                logger.info("Mattress quantity detected, querying for lot numbers")
+                mattress_lot = get_mattress_lot_numbers()
+        except (ValueError, TypeError):
+            pass
+
     # Filter and convert quantities for SCRAM RECEIPT (excluding Mattress)
     scram_receipt_lines = []
     for sku, qty in scram_quantities.items():
@@ -201,14 +259,21 @@ def create_receipt_and_order():
             except (ValueError, TypeError):
                 continue
 
-    # Filter and convert quantities for SCRAM ORDER (including Mattress)
+    # Filter and convert quantities for SCRAM ORDER (including Mattress with lot)
     scram_order_lines = []
     for sku, qty in scram_quantities.items():
         if qty and qty.strip() and qty != '0':
             try:
                 qty_int = int(qty)
                 if qty_int > 0:
-                    scram_order_lines.append({"sku": sku, "orderedQty": qty_int})
+                    order_item = {"sku": sku, "orderedQty": qty_int}
+                    
+                    # Add lot identifier for Mattress if we found one
+                    if sku == "Mattress" and mattress_lot:
+                        order_item["lotIdentifier"] = mattress_lot
+                        logger.info(f"Adding Mattress to order with lot: {mattress_lot.get('lotNumber', 'Unknown')}")
+                    
+                    scram_order_lines.append(order_item)
             except (ValueError, TypeError):
                 continue
 
@@ -268,6 +333,20 @@ def create_receipt_and_order():
             # Always create order if there are order items
             order_created = False
             if scram_order_lines:
+                # Build order items with proper structure
+                order_items = []
+                for item in scram_order_lines:
+                    order_item = {
+                        "itemIdentifier": {"sku": item["sku"]},
+                        "qty": float(item["orderedQty"])
+                    }
+                    
+                    # Add lot identifier if present (for Mattress)
+                    if "lotIdentifier" in item:
+                        order_item["lotIdentifier"] = item["lotIdentifier"]
+                    
+                    order_items.append(order_item)
+                
                 scram_order_payload = {
                     "customerIdentifier": {"id": int(customer_id)},
                     "facilityIdentifier": {"id": int(facility_id)},
@@ -275,10 +354,7 @@ def create_receipt_and_order():
                     "entryType": 4,
                     "orderType": "Standard",
                     "notes": "SCRAM Outbound order from form",
-                    "orderItems": [
-                        {"itemIdentifier": {"sku": item["sku"]}, "qty": float(item["orderedQty"])}
-                        for item in scram_order_lines
-                    ]
+                    "orderItems": order_items
                 }
 
                 logger.info(f"Submitting SCRAM order: {scram_order_payload['referenceNum']}")
@@ -351,6 +427,7 @@ def create_receipt_and_order():
         .response-box {{ background: #f5f5f5; padding: 15px; margin: 10px 0; border-left: 4px solid #007cba; }}
         .back-button {{ display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; }}
         .info-box {{ background: #e7f3ff; padding: 10px; border-radius: 4px; margin-bottom: 20px; }}
+        .lot-info {{ background: #fff3cd; padding: 10px; border-radius: 4px; margin: 10px 0; border-left: 4px solid #ffc107; }}
         h2 {{ color: #333; }}
         h3 {{ color: #555; }}
         </style>
@@ -362,6 +439,21 @@ def create_receipt_and_order():
           <p><strong>Submitted:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         </div>
         """
+
+        # Add lot info if mattress was ordered
+        if mattress_lot:
+            lot_num = mattress_lot.get('lotNumber', 'Unknown')
+            response_html += f"""
+            <div class="lot-info">
+              <p><strong>📦 Mattress Lot Selection:</strong> Automatically selected lot "{lot_num}"</p>
+            </div>
+            """
+        elif mattress_qty and mattress_qty != '0':
+            response_html += """
+            <div class="lot-info">
+              <p><strong>⚠️ Mattress Lot:</strong> No matching lot found (Dusk and Dawn/BA). Order created without lot specification.</p>
+            </div>
+            """
 
         if not results:
             response_html += """
