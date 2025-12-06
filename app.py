@@ -125,10 +125,10 @@ def get_api_headers():
     }
 
 # ---- Helper Functions ----
-def get_mattress_lot_numbers():
+def get_mattress_lot_number():
     """
-    Query available mattress inventory and return lot numbers matching 'Dusk and Dawn' or 'BA'
-    Returns a list of matching lot identifiers
+    Query available mattress inventory and return lot number string matching 'Dusk and Dawn' or 'BA'
+    Returns the lot number as a string
     """
     try:
         headers = get_api_headers()
@@ -143,27 +143,23 @@ def get_mattress_lot_numbers():
         
         if r.status_code == 200:
             inventory_data = r.json()
-            matching_lots = []
+            logger.info(f"Inventory response: {r.text[:500]}")  # Log first 500 chars for debugging
             
             # Parse inventory response to find lots matching our criteria
             if isinstance(inventory_data, dict) and 'ResourceList' in inventory_data:
                 for item in inventory_data['ResourceList']:
-                    lot_num = item.get('lotIdentifier', {}).get('lotNumber', '')
+                    lot_num = item.get('lotNumber', '') or item.get('lotIdentifier', {}).get('lotNumber', '')
                     if lot_num:
                         lot_lower = lot_num.lower()
                         # Check if lot matches "Dusk and Dawn" (any capitalization) or "BA"
                         if 'dusk and dawn' in lot_lower or lot_num.upper() == 'BA':
-                            matching_lots.append(item.get('lotIdentifier'))
                             logger.info(f"Found matching lot: {lot_num}")
+                            return lot_num  # Return the lot number string
             
-            if matching_lots:
-                logger.info(f"Found {len(matching_lots)} matching mattress lot(s)")
-                return matching_lots[0]  # Return the first matching lot
-            else:
-                logger.warning("No matching mattress lots found, will not specify lot number")
-                return None
+            logger.warning(f"No matching mattress lots found. Response structure: {list(inventory_data.keys()) if isinstance(inventory_data, dict) else 'not a dict'}")
+            return None
         else:
-            logger.warning(f"Failed to query inventory: {r.status_code}")
+            logger.warning(f"Failed to query inventory: {r.status_code}, Response: {r.text[:200]}")
             return None
             
     except Exception as e:
@@ -241,7 +237,7 @@ def create_receipt_and_order():
             qty_int = int(mattress_qty)
             if qty_int > 0:
                 logger.info("Mattress quantity detected, querying for lot numbers")
-                mattress_lot = get_mattress_lot_numbers()
+                mattress_lot = get_mattress_lot_number()
         except (ValueError, TypeError):
             pass
 
@@ -268,10 +264,10 @@ def create_receipt_and_order():
                 if qty_int > 0:
                     order_item = {"sku": sku, "orderedQty": qty_int}
                     
-                    # Add lot identifier for Mattress if we found one
+                    # Add lot number string for Mattress if we found one
                     if sku == "Mattress" and mattress_lot:
-                        order_item["lotIdentifier"] = mattress_lot
-                        logger.info(f"Adding Mattress to order with lot: {mattress_lot.get('lotNumber', 'Unknown')}")
+                        order_item["lotNumber"] = mattress_lot
+                        logger.info(f"Adding Mattress to order with lot: {mattress_lot}")
                     
                     scram_order_lines.append(order_item)
             except (ValueError, TypeError):
@@ -341,9 +337,9 @@ def create_receipt_and_order():
                         "qty": float(item["orderedQty"])
                     }
                     
-                    # Add lot identifier if present (for Mattress)
-                    if "lotIdentifier" in item:
-                        order_item["lotIdentifier"] = item["lotIdentifier"]
+                    # Add lot number string if present (for Mattress)
+                    if "lotNumber" in item:
+                        order_item["lotNumber"] = item["lotNumber"]
                     
                     order_items.append(order_item)
                 
@@ -442,10 +438,9 @@ def create_receipt_and_order():
 
         # Add lot info if mattress was ordered
         if mattress_lot:
-            lot_num = mattress_lot.get('lotNumber', 'Unknown')
             response_html += f"""
             <div class="lot-info">
-              <p><strong>📦 Mattress Lot Selection:</strong> Automatically selected lot "{lot_num}"</p>
+              <p><strong>📦 Mattress Lot Selection:</strong> Automatically selected lot "{mattress_lot}"</p>
             </div>
             """
         elif mattress_qty and mattress_qty != '0':
