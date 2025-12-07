@@ -132,40 +132,36 @@ def get_mattress_lot_number():
     """
     try:
         headers = get_api_headers()
-        customer_id = os.getenv("EXTENSIV_CUSTOMER_ID", "25")
-        facility_id = os.getenv("EXTENSIV_FACILITY_ID", "2")
         
-        # Try multiple query formats
-        query_attempts = [
-            f"https://secure-wms.com/inventory?rql=itemIdentifier.sku==Mattress;customerIdentifier.id=={customer_id}",
-            f"https://secure-wms.com/inventory?rql=itemIdentifier.sku==%22Mattress%22",
-            "https://secure-wms.com/inventory?rql=itemIdentifier.sku=like=Mattress",
-            f"https://secure-wms.com/inventory?itemIdentifier.sku=Mattress&customerIdentifier.id={customer_id}",
-            "https://secure-wms.com/inventory",  # Get all and filter
-        ]
+        # Use proper RQL syntax based on documentation
+        # Query for Mattress SKU with wildcards to match "Dusk and Dawn" or "BA"
+        # RQL: (lotNumber contains "Dusk" OR lotNumber == "BA") AND sku == "Mattress"
+        # Using wildcard: lotNumber==*Dusk* for "contains Dusk"
         
-        inventory_data = None
-        successful_url = None
+        # Try query with lot number filter
+        inventory_url = "https://secure-wms.com/inventory?rql=(lotNumber==*Dusk*,lotNumber==BA);itemIdentifier.sku==Mattress;availableQty=gt=0"
         
-        for attempt_num, inventory_url in enumerate(query_attempts, 1):
-            logger.info(f"Attempt {attempt_num}: Querying {inventory_url}")
-            r = requests.get(inventory_url, headers=headers, timeout=30)
+        logger.info(f"Querying mattress inventory with RQL: {inventory_url}")
+        r = requests.get(inventory_url, headers=headers, timeout=30)
+        
+        if r.status_code == 200:
+            inventory_data = r.json()
+            total = inventory_data.get('totalResults', 0)
+            logger.info(f"Query successful! Total results: {total}")
             
-            if r.status_code == 200:
-                data = r.json()
-                total = data.get('totalResults', 0)
-                logger.info(f"Attempt {attempt_num} - Status 200, Total results: {total}")
+            if total == 0:
+                # Fallback: Query all Mattress inventory and filter in code
+                logger.info("No results with lot filter, trying broader query...")
+                inventory_url = "https://secure-wms.com/inventory?rql=itemIdentifier.sku==Mattress;availableQty=gt=0"
+                r = requests.get(inventory_url, headers=headers, timeout=30)
                 
-                if total > 0:
-                    inventory_data = data
-                    successful_url = inventory_url
-                    logger.info(f"✓ Found {total} results with query: {inventory_url}")
-                    break
-            else:
-                logger.info(f"Attempt {attempt_num} - Status {r.status_code}: {r.text[:200]}")
+                if r.status_code == 200:
+                    inventory_data = r.json()
+                    total = inventory_data.get('totalResults', 0)
+                    logger.info(f"Broader query successful! Total results: {total}")
         
-        if not inventory_data:
-            logger.warning("All query attempts returned 0 results or failed")
+        if r.status_code != 200:
+            logger.warning(f"Query failed: {r.status_code}, Response: {r.text[:300]}")
             return None
         
         # Parse inventory response - structure is _embedded.item array
@@ -173,16 +169,7 @@ def get_mattress_lot_number():
             items = inventory_data['_embedded'].get('item', [])
             logger.info(f"Processing {len(items)} inventory items")
             
-            # Filter for Mattress SKU items (in case we got all inventory)
-            mattress_items = []
             for item in items:
-                item_sku = item.get('itemIdentifier', {}).get('sku', '')
-                if 'Mattress' in item_sku or 'mattress' in item_sku.lower():
-                    mattress_items.append(item)
-            
-            logger.info(f"Found {len(mattress_items)} Mattress items")
-            
-            for item in mattress_items:
                 lot_num = item.get('lotNumber', '')
                 available_qty = item.get('availableQty', 0)
                 sku = item.get('itemIdentifier', {}).get('sku', 'unknown')
@@ -191,12 +178,20 @@ def get_mattress_lot_number():
                 
                 if lot_num and available_qty > 0:
                     lot_lower = lot_num.lower().strip()
+                    lot_upper = lot_num.strip().upper()
+                    
                     # Check if lot matches "Dusk and Dawn" (any capitalization) or "BA"
-                    if 'dusk and dawn' in lot_lower or lot_num.strip().upper() == 'BA':
-                        logger.info(f"✓ Found matching lot: '{lot_num}' with {available_qty} available")
-                        return lot_num.strip()  # Return the lot number string
+                    if 'dusk' in lot_lower and 'dawn' in lot_lower:
+                        logger.info(f"✓ Found matching 'Dusk and Dawn' lot: '{lot_num}' with {available_qty} available")
+                        return lot_num.strip()
+                    elif lot_upper == 'BA':
+                        logger.info(f"✓ Found matching 'BA' lot: '{lot_num}' with {available_qty} available")
+                        return lot_num.strip()
             
-            logger.warning(f"Found Mattress items but none with matching lot numbers (Dusk and Dawn / BA)")
+            logger.warning(f"Found {len(items)} Mattress items but none with matching lot numbers (Dusk and Dawn / BA)")
+            # Log all lots found for debugging
+            all_lots = [item.get('lotNumber', 'N/A') for item in items]
+            logger.info(f"Available lots: {all_lots}")
             return None
         else:
             logger.warning(f"Unexpected response structure: {list(inventory_data.keys()) if isinstance(inventory_data, dict) else type(inventory_data)}")
