@@ -146,7 +146,7 @@ def get_mattress_lot_number():
         
         if r.status_code == 200:
             inventory_data = r.json()
-            total = inventory_data.get('totalResults', 0)
+            total = inventory_data.get('totalResults', 0) or inventory_data.get('TotalResults', 0)
             logger.info(f"Query successful! Total results: {total}")
             
             if total == 0:
@@ -157,17 +157,49 @@ def get_mattress_lot_number():
                 
                 if r.status_code == 200:
                     inventory_data = r.json()
-                    total = inventory_data.get('totalResults', 0)
+                    total = inventory_data.get('totalResults', 0) or inventory_data.get('TotalResults', 0)
                     logger.info(f"Broader query successful! Total results: {total}")
+                    
+                    if total == 0:
+                        # Last resort: get all inventory and filter for Mattress in code
+                        logger.info("Still no results, trying query without SKU filter...")
+                        inventory_url = "https://secure-wms.com/inventory?rql=availableQty=gt=0"
+                        r = requests.get(inventory_url, headers=headers, timeout=30)
+                        if r.status_code == 200:
+                            inventory_data = r.json()
+                            total = inventory_data.get('totalResults', 0) or inventory_data.get('TotalResults', 0)
+                            logger.info(f"Query without SKU filter: Total results: {total}")
         
         if r.status_code != 200:
             logger.warning(f"Query failed: {r.status_code}, Response: {r.text[:300]}")
             return None
         
-        # Parse inventory response - structure is _embedded.item array
-        if isinstance(inventory_data, dict) and '_embedded' in inventory_data:
-            items = inventory_data['_embedded'].get('item', [])
+        # Parse inventory response - check both possible structures
+        items = []
+        if isinstance(inventory_data, dict):
+            # Try _embedded.item structure first
+            if '_embedded' in inventory_data:
+                items = inventory_data['_embedded'].get('item', [])
+            # Try ResourceList structure (the actual format)
+            elif 'ResourceList' in inventory_data:
+                items = inventory_data['ResourceList']
+            
             logger.info(f"Processing {len(items)} inventory items")
+            
+            # Filter for Mattress items if we got all inventory
+            mattress_items = []
+            for item in items:
+                sku = item.get('itemIdentifier', {}).get('sku', '')
+                if not sku:
+                    sku = item.get('sku', '')
+                
+                # Check if this is a Mattress item (case insensitive, partial match)
+                if 'mattress' in sku.lower():
+                    mattress_items.append(item)
+            
+            if mattress_items:
+                logger.info(f"Found {len(mattress_items)} Mattress items after filtering")
+                items = mattress_items
             
             for item in items:
                 lot_num = item.get('lotNumber', '')
@@ -608,4 +640,4 @@ def internal_error(e):
 if __name__ == "__main__":
     # Local development only. On Render we use Gunicorn.
     print("Running in LOCAL DEVELOPMENT mode (debug=True)")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000) 
