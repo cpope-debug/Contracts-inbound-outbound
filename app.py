@@ -138,8 +138,8 @@ def get_mattress_lot_number():
         # RQL: (lotNumber contains "Dusk" OR lotNumber == "BA") AND sku == "Mattress"
         # Using wildcard: lotNumber==*Dusk* for "contains Dusk"
         
-        # Try query with lot number filter
-        inventory_url = "https://secure-wms.com/inventory?rql=(lotNumber==*Dusk*,lotNumber==BA);itemIdentifier.sku==Mattress;availableQty=gt=0"
+        # Try query with lot number filter - request larger page size
+        inventory_url = "https://secure-wms.com/inventory?rql=(lotNumber==*Dusk*,lotNumber==BA);itemIdentifier.sku==Mattress;availableQty=gt=0&pgsiz=200"
         
         logger.info(f"Querying mattress inventory with RQL: {inventory_url}")
         r = requests.get(inventory_url, headers=headers, timeout=30)
@@ -152,7 +152,7 @@ def get_mattress_lot_number():
             if total == 0:
                 # Fallback: Query all Mattress inventory and filter in code
                 logger.info("No results with lot filter, trying broader query...")
-                inventory_url = "https://secure-wms.com/inventory?rql=itemIdentifier.sku==Mattress;availableQty=gt=0"
+                inventory_url = "https://secure-wms.com/inventory?rql=itemIdentifier.sku==Mattress;availableQty=gt=0&pgsiz=200"
                 r = requests.get(inventory_url, headers=headers, timeout=30)
                 
                 if r.status_code == 200:
@@ -163,7 +163,7 @@ def get_mattress_lot_number():
                     if total == 0:
                         # Last resort: get all inventory and filter for Mattress in code
                         logger.info("Still no results, trying query without SKU filter...")
-                        inventory_url = "https://secure-wms.com/inventory?rql=availableQty=gt=0"
+                        inventory_url = "https://secure-wms.com/inventory?rql=availableQty=gt=0&pgsiz=200"
                         r = requests.get(inventory_url, headers=headers, timeout=30)
                         if r.status_code == 200:
                             inventory_data = r.json()
@@ -186,12 +186,17 @@ def get_mattress_lot_number():
             
             logger.info(f"Processing {len(items)} inventory items")
             
+            # Log the first item structure for debugging
+            if items:
+                logger.info(f"Sample item structure (first item keys): {list(items[0].keys())}")
+                logger.info(f"Sample item data: {items[0]}")
+            
             # Filter for Mattress items if we got all inventory
             mattress_items = []
             for item in items:
                 sku = item.get('itemIdentifier', {}).get('sku', '')
                 if not sku:
-                    sku = item.get('sku', '')
+                    sku = item.get('sku', '') or item.get('Sku', '') or item.get('itemSku', '') or item.get('ItemSku', '')
                 
                 # Check if this is a Mattress item (case insensitive, partial match)
                 if 'mattress' in sku.lower():
@@ -202,9 +207,29 @@ def get_mattress_lot_number():
                 items = mattress_items
             
             for item in items:
-                lot_num = item.get('lotNumber', '')
-                available_qty = item.get('availableQty', 0)
-                sku = item.get('itemIdentifier', {}).get('sku', 'unknown')
+                # Try multiple possible field names
+                lot_num = (
+                    item.get('lotNumber', '') or 
+                    item.get('LotNumber', '') or
+                    item.get('lot', '') or
+                    item.get('Lot', '') or
+                    ''
+                )
+                available_qty = (
+                    item.get('availableQty', 0) or 
+                    item.get('AvailableQty', 0) or
+                    item.get('onHandQty', 0) or
+                    item.get('OnHandQty', 0) or
+                    0
+                )
+                sku = (
+                    item.get('itemIdentifier', {}).get('sku', '') or
+                    item.get('sku', '') or 
+                    item.get('Sku', '') or
+                    item.get('itemSku', '') or
+                    item.get('ItemSku', '') or
+                    'unknown'
+                )
                 
                 logger.info(f"  - SKU: {sku}, Lot: '{lot_num}', Available: {available_qty}")
                 
@@ -640,4 +665,4 @@ def internal_error(e):
 if __name__ == "__main__":
     # Local development only. On Render we use Gunicorn.
     print("Running in LOCAL DEVELOPMENT mode (debug=True)")
-    app.run(debug=True, host='0.0.0.0', port=5000) 
+    app.run(debug=True, host='0.0.0.0', port=5000)
