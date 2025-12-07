@@ -132,34 +132,40 @@ def get_mattress_lot_number():
     """
     try:
         headers = get_api_headers()
-        customer_id = os.getenv("EXTENSIV_CUSTOMER_ID", "25")
-        facility_id = os.getenv("EXTENSIV_FACILITY_ID", "2")
         
-        # Query inventory for Mattress SKU
-        inventory_url = f"https://secure-wms.com/inventory?customerIdentifier.id={customer_id}&facilityIdentifier.id={facility_id}&itemIdentifier.sku=Mattress"
+        # Based on API documentation, use RQL (Resource Query Language) format
+        # Query for Mattress SKU with available quantity > 0
+        inventory_url = "https://secure-wms.com/inventory?rql=itemIdentifier.sku==Mattress"
         
-        logger.info("Querying mattress inventory for lot numbers")
+        logger.info(f"Querying mattress inventory: {inventory_url}")
         r = requests.get(inventory_url, headers=headers, timeout=30)
         
         if r.status_code == 200:
             inventory_data = r.json()
-            logger.info(f"Inventory response: {r.text[:500]}")  # Log first 500 chars for debugging
+            logger.info(f"Inventory query successful! Total results: {inventory_data.get('totalResults', 0)}")
             
-            # Parse inventory response to find lots matching our criteria
-            if isinstance(inventory_data, dict) and 'ResourceList' in inventory_data:
-                for item in inventory_data['ResourceList']:
-                    lot_num = item.get('lotNumber', '') or item.get('lotIdentifier', {}).get('lotNumber', '')
-                    if lot_num:
+            # Parse inventory response - structure is _embedded.item array
+            if isinstance(inventory_data, dict) and '_embedded' in inventory_data:
+                items = inventory_data['_embedded'].get('item', [])
+                logger.info(f"Found {len(items)} inventory items")
+                
+                for item in items:
+                    lot_num = item.get('lotNumber', '')
+                    available_qty = item.get('availableQty', 0)
+                    
+                    logger.info(f"Item: SKU={item.get('itemIdentifier', {}).get('sku')}, Lot={lot_num}, Available={available_qty}")
+                    
+                    if lot_num and available_qty > 0:
                         lot_lower = lot_num.lower()
                         # Check if lot matches "Dusk and Dawn" (any capitalization) or "BA"
                         if 'dusk and dawn' in lot_lower or lot_num.upper() == 'BA':
-                            logger.info(f"Found matching lot: {lot_num}")
+                            logger.info(f"✓ Found matching lot with available inventory: {lot_num}")
                             return lot_num  # Return the lot number string
             
-            logger.warning(f"No matching mattress lots found. Response structure: {list(inventory_data.keys()) if isinstance(inventory_data, dict) else 'not a dict'}")
+            logger.warning(f"No matching mattress lots found with available inventory")
             return None
         else:
-            logger.warning(f"Failed to query inventory: {r.status_code}, Response: {r.text[:200]}")
+            logger.warning(f"Failed to query inventory: {r.status_code}, Response: {r.text[:300]}")
             return None
             
     except Exception as e:
