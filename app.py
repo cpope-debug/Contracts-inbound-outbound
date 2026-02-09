@@ -82,34 +82,45 @@ def get_token():
     client_id = os.getenv("CLIENT_ID") or os.getenv("EXTENSIV_CLIENT_ID")
     client_secret = os.getenv("CLIENT_SECRET") or os.getenv("EXTENSIV_CLIENT_SECRET")
     tpl_key = os.getenv("TPL_CODE") or os.getenv("EXTENSIV_TPL_KEY")
+    user_login_id = os.getenv("USER_LOGIN_ID") or os.getenv("EXTENSIV_USER_LOGIN_ID")
 
     if not client_id or not client_secret:
         logger.error("Missing CLIENT_ID or CLIENT_SECRET")
         raise ValueError("CLIENT_ID and CLIENT_SECRET must be set in environment variables")
 
+    if not user_login_id:
+        logger.error("Missing USER_LOGIN_ID (or EXTENSIV_USER_LOGIN_ID)")
+        raise ValueError("USER_LOGIN_ID must be set in environment variables")
+
     credentials = f"{client_id}:{client_secret}"
-    encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
+    encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
 
     headers = {
         "Authorization": f"Basic {encoded_credentials}",
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Content-Type": "application/x-www-form-urlencoded",
     }
+
     data = {
         "grant_type": "client_credentials",
         **({"tpl": tpl_key} if tpl_key else {}),
-        "user_login_id": "4"
+        "user_login_id": user_login_id,
     }
+
     try:
         r = requests.post(url, headers=headers, data=data, timeout=30)
         r.raise_for_status()
         token_data = r.json()
-        cached_token = token_data["access_token"]
-        token_expiry = time.time() + token_data.get("expires_in", 3600) - 60
-        logger.info("Successfully obtained access token")
+        
+        cached_token = token_data.get('access_token')
+        expires_in = token_data.get('expires_in', 3600)
+        token_expiry = time.time() + expires_in
+        
+        logger.info(f"Token obtained successfully, expires in {expires_in} seconds")
         return cached_token
     except requests.exceptions.RequestException as e:
-        logger.error(f"Token request failed: {str(e)}")
-        raise e
+        logger.error(f"Failed to obtain token: {str(e)}")
+        raise ValueError(f"Authentication failed: {str(e)}")
+
 
 def get_api_headers():
     """Get headers for API requests"""
